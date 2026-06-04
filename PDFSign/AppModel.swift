@@ -50,7 +50,7 @@ final class AppModel {
         sourceURL = temp
         document = doc
         box = nil
-        placing = false
+        placing = true   // draw tool active by default — user can place immediately
         phase = .editing
         loadIdentities()
     }
