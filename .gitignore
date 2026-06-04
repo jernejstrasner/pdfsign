@@ -7,5 +7,8 @@ xcuserdata/
 # XcodeGen generates this from project.yml — not checked in
 PDFSign.xcodeproj/
 
+# PoDoFo static build output — produced by scripts/build-podofo.sh, not checked in
+vendor/
+
 # macOS
 .DS_Store

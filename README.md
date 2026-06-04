@@ -32,32 +32,40 @@ its public header is C++-free so Swift imports it via the bridging header.
 
 ## Build
 
-Requires Xcode 26+, and Homebrew packages used at build time:
+Requires Xcode 26+ and Homebrew. PoDoFo is **statically linked** (per the
+[PoDoFo static-linking guide](https://github.com/podofo/podofo/blob/master/README.md)),
+so there's a one-time vendoring step that builds it from source:
 
 ```bash
-brew install xcodegen podofo dylibbundler
+brew install xcodegen cmake
+./scripts/build-podofo.sh      # builds vendor/podofo/lib/libpodofo_bundle.a (one-time)
 xcodegen generate
-open PDFSign.xcodeproj        # or: xcodebuild -scheme PDFSign -configuration Debug build
+open PDFSign.xcodeproj         # or: xcodebuild -scheme PDFSign -configuration Debug build
 ```
 
-PoDoFo and its dependency chain (OpenSSL, freetype, fontconfig, libpng/tiff/jpeg, …) are
-**bundled into the .app** at build time by a post-build script (`dylibbundler`), rewriting
-load paths to `@executable_path/../Frameworks`. The shipped app has **zero `/opt/homebrew`
-runtime dependency** — verify with:
+`scripts/build-podofo.sh` builds PoDoFo 1.1.0 with `PODOFO_BUILD_STATIC=TRUE` +
+`PODOFO_BUILD_LIB_ONLY=TRUE`, then `libtool`-merges PoDoFo and all of its static
+dependencies (OpenSSL, freetype, fontconfig, gettext, libpng/tiff/jpeg, brotli, lzma,
+zstd) into a single `libpodofo_bundle.a`. The app links that archive plus a handful of
+**system** libraries (`libxml2`, `z`, `bz2`, `expat`, `iconv`) and `CoreFoundation`, with
+`PODOFO_STATIC` defined. Nothing is copied into the `.app` — there's no `Frameworks` dir
+and **zero `/opt/homebrew` runtime dependency**:
 
 ```bash
 otool -L PDFSign.app/Contents/MacOS/PDFSign.debug.dylib | grep opt/homebrew   # (empty)
 ```
 
+`vendor/` is git-ignored; re-run the script to update PoDoFo (bump `PODOFO_VERSION`).
+
 ## TODO (distribution)
 
-The dev build runs ad-hoc-signed with App Sandbox and Hardened Runtime **off** so the
-bundled (ad-hoc-signed) dylibs load. Before distributing:
+The dev build runs ad-hoc-signed with App Sandbox and Hardened Runtime **off**. Before
+distributing:
 
 - Enable **App Sandbox** (`com.apple.security.files.user-selected.read-write`) and
-  **Hardened Runtime**.
-- Re-sign every bundled dylib **and** the app with a **Developer ID** identity, then
-  **notarize** (the `asc-notarization` workflow applies).
+  **Hardened Runtime** (static linking means there are no nested dylibs to sign).
+- Sign the app with a **Developer ID** identity, then **notarize**
+  (the `asc-notarization` workflow applies).
 - Consider **RFC 3161 timestamps** (TSA) and **PAdES LTV** — currently out of scope.
 - Multi-signature, signature validation UI, and certification flags are out of scope.
 
@@ -66,7 +74,7 @@ bundled (ad-hoc-signed) dylibs load. Before distributing:
 - PoDoFo's `Rect` collides with the legacy QuickDraw `Rect` from `MacTypes.h` — qualify
   `PoDoFo::Rect`.
 - `PdfDate()` defaults to the **epoch**; use `PdfDate::UtcNow()`.
-- `dylibbundler` needs `-Wl,-headerpad_max_install_names` on the linked binary, and the
-  build script is idempotent so incremental builds don't re-run it.
-- In Debug, Xcode links into `PDFSign.debug.dylib` (not the stub exe); the bundler targets
-  whichever binary actually references Homebrew.
+- Static linking pulls in transitive deps the linker won't auto-find: `libintl` (gettext,
+  via fontconfig) and `CoreFoundation` (via gettext) are the non-obvious ones.
+- The build needs `vendor/podofo/` present — run `scripts/build-podofo.sh` first or the
+  link fails with a missing-archive error.
