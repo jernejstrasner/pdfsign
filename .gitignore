@@ -1,0 +1,11 @@
+# Xcode / build output
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+
+# XcodeGen generates this from project.yml — not checked in
+PDFSign.xcodeproj/
+
+# macOS
+.DS_Store

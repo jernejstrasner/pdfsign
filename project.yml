@@ -1,0 +1,83 @@
+name: PDFSign
+options:
+  bundleIdPrefix: com.strsnr
+  deploymentTarget:
+    macOS: "26.0"
+  createIntermediateGroups: true
+  defaultConfig: Debug
+
+settings:
+  base:
+    PRODUCT_NAME: PDFSign
+    MARKETING_VERSION: "0.1"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "5.0"
+    CLANG_CXX_LANGUAGE_STANDARD: "c++17"
+    CLANG_CXX_LIBRARY: "libc++"
+    GENERATE_INFOPLIST_FILE: YES
+    # Dev build: no sandbox / hardened runtime so bundled (ad-hoc signed) dylibs load.
+    # TODO(distribution): enable App Sandbox + Hardened Runtime, sign dylibs with Developer ID, notarize.
+    ENABLE_HARDENED_RUNTIME: NO
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: "-"
+    DEVELOPMENT_TEAM: ""
+    ONLY_ACTIVE_ARCH: YES
+
+targets:
+  PDFSign:
+    type: application
+    platform: macOS
+    sources:
+      - path: PDFSign
+    dependencies:
+      - sdk: PDFKit.framework
+      - sdk: Security.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.strsnr.pdfsign
+        SWIFT_OBJC_BRIDGING_HEADER: PDFSign/SigningEngine/PDFSign-Bridging-Header.h
+        INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.productivity"
+        INFOPLIST_KEY_NSHumanReadableCopyright: ""
+        # PoDoFo is linked at build time from Homebrew; bundled into the .app at the end.
+        HEADER_SEARCH_PATHS:
+          - /opt/homebrew/include
+        LIBRARY_SEARCH_PATHS:
+          - /opt/homebrew/lib
+        OTHER_LDFLAGS:
+          - -lpodofo
+          # Reserve Mach-O header space so dylibbundler can rewrite load paths in place.
+          - -Wl,-headerpad_max_install_names
+        LD_RUNPATH_SEARCH_PATHS:
+          - "$(inherited)"
+          - "@executable_path/../Frameworks"
+    postBuildScripts:
+      - name: Bundle PoDoFo dylibs into the app
+        basedOnDependencyAnalysis: false
+        shell: /bin/bash
+        script: |
+          set -euo pipefail
+          EXE="$TARGET_BUILD_DIR/$EXECUTABLE_PATH"
+          FW="$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH"
+          if ! command -v dylibbundler >/dev/null 2>&1; then
+            echo "warning: dylibbundler not found — run 'brew install dylibbundler'. App will depend on /opt/homebrew."
+            exit 0
+          fi
+          # Only fix binaries that actually pull in Homebrew dylibs: in Debug that's the
+          # .debug.dylib (the stub exe has no external deps); in Release it's the exe.
+          CANDIDATES=( "$EXE" )
+          [ -f "${EXE}.debug.dylib" ] && CANDIDATES+=( "${EXE}.debug.dylib" )
+          XFLAGS=()
+          for t in "${CANDIDATES[@]}"; do
+            otool -L "$t" | grep -q '/opt/homebrew' && XFLAGS+=( -x "$t" ) || true
+          done
+          # Idempotent: nothing left referencing Homebrew → already bundled, skip.
+          if [ ${#XFLAGS[@]} -eq 0 ]; then
+            echo "PoDoFo already bundled; skipping."; exit 0
+          fi
+          # Copy every non-system dylib into Contents/Frameworks and rewrite load paths.
+          dylibbundler -of -cd -b "${XFLAGS[@]}" -d "$FW" -p "@executable_path/../Frameworks"
+          # Re-sign bundled dylibs (ad-hoc); Xcode signs the app/executable afterwards.
+          shopt -s nullglob
+          for dylib in "$FW"/*.dylib; do
+            codesign --force --sign - "$dylib"
+          done
