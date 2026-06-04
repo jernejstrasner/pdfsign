@@ -51,12 +51,19 @@ Personal tool, early days. Out of scope for now: RFC 3161 trusted timestamps, PA
 and multiple signatures. The distribution build (App Sandbox, Developer ID signing,
 notarization) is still TODO — the dev build is ad-hoc signed.
 
-## Third-party & licensing
+## License
+
+PDFSign's own code is licensed under the
+**[PolyForm Noncommercial License 1.0.0](LICENSE.md)** — free to use, modify, and share
+for **noncommercial** purposes, provided you keep the required attribution
+(© Jernej Štrasner, with a link back to this repository). It is source-available, not OSI
+open source. For commercial use, get in touch.
+
+### Third-party
 
 PDFSign is built on **[PoDoFo](https://github.com/podofo/podofo)**, a C++ PDF manipulation
-library, which is dual-licensed **`LGPL-2.0-or-later` OR `MPL-2.0`**. PDFSign statically
-links PoDoFo under the **MPL-2.0** option. PoDoFo itself depends on OpenSSL, FreeType,
-Fontconfig, libpng, libtiff, libjpeg-turbo and others — see PoDoFo's
-[NOTICE](https://github.com/podofo/podofo/blob/master/NOTICE) for their respective licenses.
-
-A license for PDFSign's own code has not been chosen yet.
+library dual-licensed **`LGPL-2.0-or-later` OR `MPL-2.0`**; PDFSign statically links it
+under the **MPL-2.0** option. PoDoFo in turn depends on OpenSSL, FreeType, Fontconfig,
+libpng, libtiff, libjpeg-turbo and others — see PoDoFo's
+[NOTICE](https://github.com/podofo/podofo/blob/master/NOTICE) for their licenses. These
+third-party components keep their own licenses; PDFSign's license covers only its own code.
