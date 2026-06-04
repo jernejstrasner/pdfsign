@@ -15,13 +15,22 @@ settings:
     CLANG_CXX_LANGUAGE_STANDARD: "c++17"
     CLANG_CXX_LIBRARY: "libc++"
     GENERATE_INFOPLIST_FILE: YES
-    # Dev build: no sandbox / hardened runtime so bundled (ad-hoc signed) dylibs load.
-    # TODO(distribution): enable App Sandbox + Hardened Runtime, sign dylibs with Developer ID, notarize.
-    ENABLE_HARDENED_RUNTIME: NO
     CODE_SIGN_STYLE: Manual
-    CODE_SIGN_IDENTITY: "-"
-    DEVELOPMENT_TEAM: ""
+    DEVELOPMENT_TEAM: "286DN3SPR7"
     ONLY_ACTIVE_ARCH: YES
+  configs:
+    # Dev loop: ad-hoc signed, no Hardened Runtime — fast, no cert prompts.
+    Debug:
+      CODE_SIGN_IDENTITY: "-"
+      ENABLE_HARDENED_RUNTIME: NO
+    # Distribution: Developer ID + Hardened Runtime + secure timestamp, required for notarization.
+    Release:
+      CODE_SIGN_IDENTITY: "Developer ID Application"
+      ENABLE_HARDENED_RUNTIME: YES
+      OTHER_CODE_SIGN_FLAGS: "--timestamp"
+      # App needs no entitlements; stop Xcode injecting the debug-only
+      # get-task-allow entitlement, which the notary service rejects.
+      CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
 
 targets:
   PDFSign:
@@ -37,7 +46,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.strsnr.pdfsign
         SWIFT_OBJC_BRIDGING_HEADER: PDFSign/SigningEngine/PDFSign-Bridging-Header.h
         INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.productivity"
-        INFOPLIST_KEY_NSHumanReadableCopyright: ""
+        INFOPLIST_KEY_NSHumanReadableCopyright: "Copyright 2026 Jernej Štrasner"
         # PoDoFo is statically linked from vendor/podofo (built by scripts/build-podofo.sh).
         # The merged archive contains PoDoFo + OpenSSL/freetype/fontconfig/png/tiff/jpeg/
         # brotli/lzma/zstd; only system libs (libxml2, z, bz2, expat, iconv) link dynamically.

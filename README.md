@@ -48,8 +48,19 @@ app links. The resulting `.app` has **zero `/opt/homebrew` runtime dependency**.
 ## Status
 
 Personal tool, early days. Out of scope for now: RFC 3161 trusted timestamps, PAdES LTV,
-and multiple signatures. The distribution build (App Sandbox, Developer ID signing,
-notarization) is still TODO — the dev build is ad-hoc signed.
+and multiple signatures.
+
+Release builds are signed with a **Developer ID Application** certificate, built with the
+**Hardened Runtime** and a secure timestamp, and **notarized** by Apple (then stapled), so
+they pass Gatekeeper without warnings. The dev (Debug) build stays ad-hoc signed for a fast
+local loop. To produce a notarized build:
+
+```bash
+./scripts/notarize.sh    # Release build → notarize (via asc) → staple → verify; output in dist/
+```
+
+Notarization uses [`asc`](https://github.com/aaronsky/asc) (App Store Connect API key);
+see `CLAUDE.md` for details.
 
 ## License
 

@@ -1,5 +1,6 @@
 # Xcode / build output
 build/
+dist/
 DerivedData/
 *.xcuserstate
 xcuserdata/
