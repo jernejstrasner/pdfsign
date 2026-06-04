@@ -101,4 +101,5 @@ Re-zip the **stapled** `.app` for the artifact you actually ship.
 
 - No RFC 3161 trusted timestamp on the *signature* itself (the codesign timestamp is separate);
   no PAdES-LTV; single signature only.
-- App icon is the default placeholder; bundle id is `com.strsnr.pdfsign`.
+- App icon source is `icon/AppIcon.svg`; regenerate the asset catalog with `icon/make-icons.sh`.
+  Bundle id is `com.strsnr.pdfsign`.
