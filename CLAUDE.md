@@ -100,6 +100,15 @@ spctl -a -vvv -t exec "$APP"                                  # expect: accepted
 Why staple: it embeds the notarization ticket in the bundle so Gatekeeper accepts it offline.
 Re-zip the **stapled** `.app` for the artifact you actually ship.
 
+### Release checklist (e.g. 0.1 → 0.2)
+
+1. Commit the feature work.
+2. Bump `MARKETING_VERSION` in `project.yml`; commit as `Bump version to X.Y`.
+3. `./scripts/notarize.sh` → verified, stapled `dist/PDFSign.zip`.
+4. `cp dist/PDFSign.zip dist/PDFSign-X.Y.zip` — versioned artifact convention.
+5. `git tag -a vX.Y -m "PDFSign X.Y — …" && git push origin main vX.Y`
+6. `gh release create vX.Y dist/PDFSign-X.Y.zip --title "PDFSign X.Y" --notes "…"`
+
 ## Conventions
 
 - Comments explain **why**, not what. Leave a `TODO:` (with a reason) for known gaps.
