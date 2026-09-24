@@ -1,4 +1,4 @@
-# CLAUDE.md — PDFSign
+# AGENTS.md — PDFSign
 
 A small, native macOS app that applies a **visible digital signature** to a PDF using a
 certificate from the **Keychain**. The private key never leaves the Keychain: PoDoFo builds

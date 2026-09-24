@@ -60,7 +60,7 @@ local loop. To produce a notarized build:
 ```
 
 Notarization uses [`asc`](https://github.com/aaronsky/asc) (App Store Connect API key);
-see `CLAUDE.md` for details.
+see `AGENTS.md` for details.
 
 ## License
 
