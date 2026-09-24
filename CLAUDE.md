@@ -15,7 +15,12 @@ PDFSign/                      Swift + Objective-C++ app source
   ContentView.swift           SwiftUI UI; native title-bar toolbar (Open, Draw, cert Picker, Sign & Save)
   Models.swift                SigningIdentity, SignatureBox
   KeychainService.swift       Lists kSecClassIdentity items; common-name labels
-  PDFPreview.swift            NSViewRepresentable PDFView + drag-to-place overlay
+  SignatureStore.swift        Persists the user's signature image (PNG in Application Support)
+  SignatureCanvas.swift       Trackpad/mouse signature pad; renders cropped transparent PNG
+  AppearanceEditor.swift      Toolbar popover: signature image, date toggle, custom text, stamp preview
+  PDFPreview.swift            NSViewRepresentable PDFView + drag-to-place overlay;
+                              StampAnnotation renders a live stamp preview in the placement box;
+                              box is resizable (8 handles) and movable via mouse-drag sessions
   SigningEngine/
     PDFSigningEngine.h        C++-free ObjC interface (imports cleanly into Swift)
     PDFSigningEngine.mm       ObjC++ core: PoDoFo signing + SecKeyCreateSignature callback
@@ -43,6 +48,10 @@ and run `xcodegen generate`.
   archive by full path; only system libs (libxml2, z, bz2, expat, iconv) link dynamically via
   the SDK. Result: **no `/opt/homebrew` runtime dependency**, no embedded dylibs to sign.
 - **Output format:** PAdES-B (ETSI.CAdES, detached), SHA-256. Validates in Preview, Acrobat, `pdfsig`.
+- **Stamp appearance** is customizable (Appearance toolbar popover): a drawn/imported signature
+  image replaces the default seal badge, plus optional date line and free-text line. Settings
+  persist in UserDefaults; the image as `~/Library/Application Support/PDFSign/signature.png`.
+  The engine takes them as `signatureImagePNG` / `includeDate` / `customText`.
 
 ## Build & run (dev)
 

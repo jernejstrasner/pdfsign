@@ -8,6 +8,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 using namespace PoDoFo;
 
@@ -74,6 +75,9 @@ static NSData *SealBadgePNG(CGFloat px) {
           signerName:(NSString *)signerName
               reason:(NSString *)reason
             location:(NSString *)location
+  signatureImagePNG:(NSData *)signatureImagePNG
+         includeDate:(BOOL)includeDate
+          customText:(NSString *)customText
                error:(NSError *_Nullable *_Nullable)error {
     // --- 1. Pull the certificate (DER) and private key out of the identity. ---
     SecCertificateRef certRef = NULL;
@@ -117,15 +121,18 @@ static NSData *SealBadgePNG(CGFloat px) {
     pf.timeZone = [NSTimeZone timeZoneWithAbbreviation:@"UTC"];
     pf.dateFormat = @"'D:'yyyyMMddHHmmss'Z'";  // PDF date syntax for the annotation /M
 
+    // Stamp text: signer name, optional date, optional free-text line.
     NSString *l1 = signerName.length ? [NSString stringWithFormat:@"Signed by %@", signerName]
                                      : @"Digitally signed";
-    NSString *l2 = [dateStr stringByAppendingString:@" UTC"];
-    NSString *l3 = reason.length ? [NSString stringWithFormat:@"Reason: %@", reason] : nil;
-    NSString *contentsNS = l3 ? [NSString stringWithFormat:@"%@ · %@ · %@", l1, l2, l3]
-                              : [NSString stringWithFormat:@"%@ · %@", l1, l2];
+    NSString *l2 = includeDate ? [dateStr stringByAppendingString:@" UTC"] : nil;
+    NSString *l3 = customText.length ? customText : nil;
+    NSMutableArray<NSString *> *parts = [NSMutableArray arrayWithObject:l1];
+    if (l2) [parts addObject:l2];
+    if (l3) [parts addObject:l3];
+    NSString *contentsNS = [parts componentsJoinedByString:@" · "];
 
     std::string line1(l1.UTF8String);
-    std::string line2(l2.UTF8String);
+    std::string line2(l2 ? l2.UTF8String : "");
     std::string line3(l3 ? l3.UTF8String : "");
     std::string pdfDate([pf stringFromDate:now].UTF8String);
     std::string contents(contentsNS.UTF8String);
@@ -175,61 +182,140 @@ static NSData *SealBadgePNG(CGFloat px) {
             border.AddRectangle(0.6, 0.6, std::max(1.0, w - 1.2), std::max(1.0, h - 1.2), 4.0, 4.0);
             painter.DrawPath(border, PdfPathDrawMode::Stroke);
 
-            // Seal badge on the left — the checkmark.seal.fill SF Symbol, with a vector fallback.
-            const double iconSize = std::clamp(h - 2.0 * pad, 16.0, 40.0);
-            const double iconX = pad;
-            const double iconY = (h - iconSize) / 2.0;
-            bool drewBadge = false;
-            if (badgePNG != nil && badgePNG.length > 0) {
-                try {
-                    auto badge = doc.CreateImage();
-                    badge->LoadFromBuffer(bufferview((const char *)badgePNG.bytes,
-                                                     (size_t)badgePNG.length));
-                    const double sc = iconSize / 128.0;
-                    painter.DrawImage(*badge, iconX, iconY, sc, sc);
-                    drewBadge = true;
-                } catch (...) {
-                    drewBadge = false;
-                }
-            }
-            if (!drewBadge) {  // fallback: green disc + white check
-                const double r = iconSize / 2.0, cx = iconX + r, cy = h / 2.0;
-                painter.GraphicsState.SetNonStrokingColor(PdfColor(0.20, 0.65, 0.33));
-                painter.DrawCircle(cx, cy, r, PdfPathDrawMode::Fill);
-                painter.GraphicsState.SetStrokingColor(PdfColor(1.0, 1.0, 1.0));
-                painter.GraphicsState.SetLineWidth(std::max(1.4, r * 0.22));
-                painter.GraphicsState.SetLineCapStyle(PdfLineCapStyle::Round);
-                painter.GraphicsState.SetLineJoinStyle(PdfLineJoinStyle::Round);
-                PdfPainterPath check;
-                check.MoveTo(cx - r * 0.45, cy + r * 0.05);
-                check.AddLineTo(cx - r * 0.08, cy - r * 0.32);
-                check.AddLineTo(cx + r * 0.48, cy + r * 0.42);
-                painter.DrawPath(check, PdfPathDrawMode::Stroke);
-            }
-
-            // Text block, vertically centered next to the badge.
-            const double tx = iconX + iconSize + pad;
+            // --- Adaptive stamp layout ---
+            // Wide box: graphic left, text right. Tall box: graphic on top, text
+            // below, centered. Fonts shrink to fit the available width so the
+            // content never clips the box.
             auto &bold = doc.GetFonts().GetStandard14Font(PdfStandard14FontType::HelveticaBold);
             auto &reg = doc.GetFonts().GetStandard14Font(PdfStandard14FontType::Helvetica);
-            const double fs1 = std::clamp(h * 0.20, 7.0, 11.0);
-            const double fs2 = std::clamp(h * 0.165, 6.0, 9.0);
-            const double gap = 4.0;
-            const bool hasL3 = !line3.empty();
+
+            std::vector<std::string> sub;                   // lines under the signer name
+            if (!line2.empty()) sub.push_back(line2);
+            if (!line3.empty()) sub.push_back(line3);
+
+            auto widthOf = [](PdfFont &f, const std::string &s, double fs) {
+                PdfTextState st;
+                st.Font = &f;
+                st.FontSize = fs;
+                double len = 0.0;
+                f.TryGetStringLength(s, st, len);   // partial result, never throws
+                return len;
+            };
+
+            // Load the signature image up front — layout needs its aspect ratio.
+            std::unique_ptr<PdfImage> sigImg;
+            double sigAspect = 0.0;
+            if (signatureImagePNG != nil && signatureImagePNG.length > 0) {
+                try {
+                    sigImg = doc.CreateImage();
+                    sigImg->LoadFromBuffer(bufferview((const char *)signatureImagePNG.bytes,
+                                                      (size_t)signatureImagePNG.length));
+                    if (sigImg->GetWidth() > 0 && sigImg->GetHeight() > 0)
+                        sigAspect = (double)sigImg->GetWidth() / (double)sigImg->GetHeight();
+                    else
+                        sigImg = nullptr;
+                } catch (...) {
+                    sigImg = nullptr;
+                }
+            }
+
+            const bool horizontal = w >= h * 1.5;
+            double fs1 = std::clamp(h * 0.20, 5.0, 11.0);
+            double fs2 = std::clamp(h * 0.165, 4.5, 9.0);
+            double imgX = pad, imgY = 0.0, imgW = 0.0, imgH = 0.0;
+            double tx = pad, availW = w - 2.0 * pad;
+            double textRegionY = 0.0, textRegionH = h;
+
+            if (horizontal) {
+                if (sigImg) {
+                    imgH = std::max(8.0, h - 2.0 * pad);
+                    imgW = imgH * sigAspect;
+                    const double maxW = std::max(8.0, w * 0.45);  // leave room for text
+                    if (imgW > maxW) { imgW = maxW; imgH = imgW / sigAspect; }
+                } else {
+                    imgH = imgW = std::clamp(h - 2.0 * pad, 16.0, 40.0);  // badge slot
+                }
+                imgY = (h - imgH) / 2.0;
+                tx = pad + imgW + pad;
+                availW = w - tx - pad;
+            } else {
+                imgH = sigImg ? std::min(h * 0.45, (w - 2.0 * pad) / sigAspect)
+                              : std::clamp(std::min(h * 0.45, w - 2.0 * pad), 12.0, 40.0);
+                imgW = sigImg ? imgH * sigAspect : imgH;
+                imgX = (w - imgW) / 2.0;
+                imgY = h - pad - imgH;                      // graphic hugs the top
+                textRegionY = pad;
+                textRegionH = std::max(0.0, imgY - pad - pad);
+                fs1 = std::clamp(textRegionH * 0.34, 5.0, 11.0);
+                fs2 = std::clamp(fs1 * 0.82, 4.5, 9.0);
+            }
+
+            // Shrink fonts if the longest line would overflow the available width.
+            double maxLineW = widthOf(bold, line1, fs1);
+            for (const auto &s : sub) maxLineW = std::max(maxLineW, widthOf(reg, s, fs2));
+            if (maxLineW > availW && maxLineW > 0.0) {
+                const double scale = availW / maxLineW;
+                fs1 = std::max(3.0, fs1 * scale);  // past ~3pt it clips at the border
+                fs2 = std::max(3.0, fs2 * scale);
+            }
+
+            // Graphic: signature image, or the seal badge (SF Symbol, vector fallback).
+            if (sigImg) {
+                painter.DrawImage(*sigImg, imgX, imgY,
+                                  imgW / (double)sigImg->GetWidth(),
+                                  imgH / (double)sigImg->GetHeight());
+            } else {
+                const double iconSize = imgH;
+                bool drewBadge = false;
+                if (badgePNG != nil && badgePNG.length > 0) {
+                    try {
+                        auto badge = doc.CreateImage();
+                        badge->LoadFromBuffer(bufferview((const char *)badgePNG.bytes,
+                                                         (size_t)badgePNG.length));
+                        const double sc = iconSize / 128.0;
+                        painter.DrawImage(*badge, imgX, imgY, sc, sc);
+                        drewBadge = true;
+                    } catch (...) {
+                        drewBadge = false;
+                    }
+                }
+                if (!drewBadge) {  // fallback: green disc + white check
+                    const double r = iconSize / 2.0, cx = imgX + r, cy = imgY + r;
+                    painter.GraphicsState.SetNonStrokingColor(PdfColor(0.20, 0.65, 0.33));
+                    painter.DrawCircle(cx, cy, r, PdfPathDrawMode::Fill);
+                    painter.GraphicsState.SetStrokingColor(PdfColor(1.0, 1.0, 1.0));
+                    painter.GraphicsState.SetLineWidth(std::max(1.4, r * 0.22));
+                    painter.GraphicsState.SetLineCapStyle(PdfLineCapStyle::Round);
+                    painter.GraphicsState.SetLineJoinStyle(PdfLineJoinStyle::Round);
+                    PdfPainterPath check;
+                    check.MoveTo(cx - r * 0.45, cy + r * 0.05);
+                    check.AddLineTo(cx - r * 0.08, cy - r * 0.32);
+                    check.AddLineTo(cx + r * 0.48, cy + r * 0.42);
+                    painter.DrawPath(check, PdfPathDrawMode::Stroke);
+                }
+            }
+
+            // Text block, centered in its region (whole box when horizontal, below
+            // the graphic when vertical).
             const double a1 = fs1 * 0.72, a2 = fs2 * 0.72;  // visual cap heights
-            const double blockH = a1 + (gap + a2) + (hasL3 ? (gap + a2) : 0.0);
-            double y = (h + blockH) / 2.0 - a1;             // baseline of line 1
+            const double gap = 4.0;
+            const double blockH = a1 + (double)sub.size() * (gap + a2);
+            double y = textRegionY + (textRegionH + blockH) / 2.0 - a1;  // baseline of line 1
+
+            auto drawLine = [&](PdfFont &f, const std::string &s, double fs, double baseline) {
+                double x = tx;
+                if (!horizontal) x = (w - widthOf(f, s, fs)) / 2.0;  // centered
+                painter.TextState.SetFont(f, fs);
+                painter.DrawText(s, x, baseline);
+            };
 
             painter.GraphicsState.SetNonStrokingColor(PdfColor(0.10, 0.10, 0.12));
-            painter.TextState.SetFont(bold, fs1);
-            painter.DrawText(line1, tx, y);
+            drawLine(bold, line1, fs1, y);
 
             painter.GraphicsState.SetNonStrokingColor(PdfColor(0.34, 0.36, 0.40));
-            painter.TextState.SetFont(reg, fs2);
-            y -= (gap + a2);
-            painter.DrawText(line2, tx, y);
-            if (hasL3) {
+            for (const auto &s : sub) {
                 y -= (gap + a2);
-                painter.DrawText(line3, tx, y);
+                drawLine(reg, s, fs2, y);
             }
 
             painter.FinishDrawing();

@@ -6,6 +6,7 @@ import AppKit
 struct ContentView: View {
     @Bindable var model: AppModel
     @State private var showImporter = false
+    @State private var showAppearance = false
 
     var body: some View {
         content
@@ -70,6 +71,17 @@ struct ContentView: View {
                 .disabled(model.phase != .editing)
             }
 
+            ToolbarItem(placement: .navigation) {
+                Button { showAppearance.toggle() } label: {
+                    Label("Signature", systemImage: "pencil.and.scribble")
+                }
+                .help("Signature image, date and text stamped with the signature")
+                .popover(isPresented: $showAppearance, arrowEdge: .bottom) {
+                    AppearanceEditor(model: model)
+                }
+                .disabled(model.phase != .editing)
+            }
+
             ToolbarItemGroup(placement: .primaryAction) {
                 if model.identities.isEmpty {
                     Text("No certificates").foregroundStyle(.secondary)
@@ -106,7 +118,8 @@ struct ContentView: View {
     private var editor: some View {
         ZStack(alignment: .top) {
             if let document = model.document {
-                PDFPreview(document: document, placing: $model.placing) { box in
+                PDFPreview(document: document, placing: $model.placing,
+                           appearance: model.stampAppearance) { box in
                     model.box = box
                     model.placing = false
                 }

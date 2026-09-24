@@ -1,6 +1,7 @@
 import SwiftUI
 import PDFKit
 import Security
+import AppKit
 
 @Observable
 final class AppModel {
@@ -20,7 +21,38 @@ final class AppModel {
     var box: SignatureBox?
     var placing = false
 
+    // Stamp appearance — persisted across launches (image in Application Support,
+    // toggles in UserDefaults). Applied to every signature the engine stamps.
+    var signatureImage: NSImage? {
+        didSet { SignatureStore.save(signatureImage) }
+    }
+    var includeDate: Bool {
+        didSet { UserDefaults.standard.set(includeDate, forKey: Self.includeDateKey) }
+    }
+    var customText: String {
+        didSet { UserDefaults.standard.set(customText, forKey: Self.customTextKey) }
+    }
+
+    private static let includeDateKey = "stamp.includeDate"
+    private static let customTextKey = "stamp.customText"
+
+    init() {
+        signatureImage = SignatureStore.load()
+        // Default to showing the date when the key was never set.
+        includeDate = UserDefaults.standard.object(forKey: Self.includeDateKey) as? Bool ?? true
+        customText = UserDefaults.standard.string(forKey: Self.customTextKey) ?? ""
+    }
+
     var canSign: Bool { box != nil && selectedIdentity != nil && sourceURL != nil }
+
+    /// Current stamp look, fed to the placement-box preview in the PDF view.
+    var stampAppearance: StampAppearance {
+        let text = customText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return StampAppearance(image: signatureImage,
+                               name: selectedIdentity?.label,
+                               showDate: includeDate,
+                               customText: text.isEmpty ? nil : text)
+    }
 
     func loadIdentities() {
         identities = KeychainService.loadIdentities()
@@ -75,6 +107,9 @@ final class AppModel {
         let signerName = identity.label
         let pageIndex = box.pageIndex
         let rect = box.rect
+        let imagePNG = signatureImage.flatMap { SignatureStore.pngData($0) }
+        let stampDate = includeDate
+        let text = customText.trimmingCharacters(in: .whitespacesAndNewlines)
 
         Task.detached {
             do {
@@ -86,7 +121,10 @@ final class AppModel {
                     identity: secIdentity,
                     signerName: signerName,
                     reason: nil,
-                    location: nil)
+                    location: nil,
+                    signatureImagePNG: imagePNG,
+                    includeDate: stampDate,
+                    customText: text.isEmpty ? nil : text)
                 await MainActor.run { self.phase = .done(outputURL) }
             } catch {
                 await MainActor.run { self.phase = .failed(error.localizedDescription) }
