@@ -4,11 +4,20 @@ A dead-simple native macOS app for applying a **visible digital signature** to a
 using a certificate from your **Keychain** — the private key never leaves the Keychain.
 
 No Adobe, no cloud, no accounts. Open a PDF, drag a box where the signature should go,
-pick a certificate, sign.
+pick a certificate, sign. Or let an agent do the legwork (see [Agents & CLI](#agents--cli)).
 
 ## Features
 
-- **Visible signature stamp** — seal icon + signer name, UTC timestamp, and optional reason.
+- **Visible signature stamp** — your drawn/imported signature (or a seal icon) + signer name,
+  UTC timestamp, and an optional text line.
+- **Multiple fields** — place as many signature stamps, date fields (filled with the signing
+  date, in a format you choose) and text fields as the document needs. Click a tool and drag
+  (or just click for a default-sized field); select to move/resize, ⌫ to delete, ⌘D to
+  duplicate, "Every Page" to repeat a field (e.g. initials) on all pages. One cryptographic
+  signature covers all of them, and every signature stamp opens it in Acrobat's signature panel.
+- **Existing signature fields** — if the document already has an empty signature field, it's
+  highlighted ("Sign here"); click it and the signature goes into that field.
+- **Rotated pages** — fields go where you see them and read upright on landscape/rotated pages.
 - **Standards-based** — PAdES‑B (ETSI.CAdES, detached), SHA‑256. Output validates in
   Preview, Adobe Acrobat, and `pdfsig`.
 - **Keychain-native** — signs with any identity in your Keychain, including non-exportable
@@ -18,6 +27,56 @@ pick a certificate, sign.
   screen with a "Signed" badge.
 - **Self-contained** — PoDoFo is statically linked; the app has no runtime dependencies
   beyond macOS itself.
+
+## Agents & CLI
+
+The app binary doubles as a headless CLI and an [MCP](https://modelcontextprotocol.io) server,
+so an LLM agent can drive the whole flow: inspect the document, find where to sign, place
+fields, render a preview to check them, confirm the certificate, sign and export.
+
+```bash
+PDFSign=/Applications/PDFSign.app/Contents/MacOS/PDFSign
+$PDFSign help                                   # full reference
+$PDFSign find contract.pdf "Signature"          # → page + rectangle of each match
+$PDFSign render contract.pdf --page 3 --fields fields.json --out p3.png   # preview with grid
+$PDFSign identities                             # certificates + SHA-256 fingerprints
+$PDFSign sign contract.pdf --out signed.pdf --identity 4B90DF99 --fields fields.json
+$PDFSign review contract.pdf --fields fields.json   # open in the app for you to sign
+```
+
+`fields.json` (PDF points on the page as displayed — rotation applied, as `render` shows it —
+origin bottom-left, 1-based pages):
+
+```json
+{"fields": [
+  {"type": "signature", "page": 3, "rect": {"x": 350, "y": 90, "width": 180, "height": 60}},
+  {"type": "signature", "field": "ClientSignature"},
+  {"type": "date",      "page": 3, "rect": [350, 60, 90, 18], "format": "yyyy-MM-dd"},
+  {"type": "text",      "page": 3, "rect": [72, 60, 160, 18], "text": "Ljubljana"}
+]}
+```
+
+A `"field"` entry fills one of the document's existing empty signature fields (names come from
+`inspect`) instead of placing a box. All output is JSON. Certificates are chosen by exact fingerprint (or unique prefix) or exact
+name — never fuzzily — and the input PDF is never modified. `review` hands the prepared
+document to the GUI (fields placed, certificate pre-selected) so a human signs it.
+
+**MCP:** register the server with your client, e.g. for Claude Code:
+
+```bash
+claude mcp add pdfsign -- /Applications/PDFSign.app/Contents/MacOS/PDFSign mcp
+```
+
+Tools: `list_identities`, `inspect_pdf`, `get_text`, `find_text`, `render_page` (returns the
+PNG), `sign_pdf`, `open_for_review`.
+
+To get a `pdfsign` command, use a wrapper script rather than a symlink — the binary locates
+its bundle from its real path:
+
+```bash
+printf '#!/bin/sh\nexec /Applications/PDFSign.app/Contents/MacOS/PDFSign "$@"\n' > /usr/local/bin/pdfsign
+chmod +x /usr/local/bin/pdfsign
+```
 
 ## How it works
 
@@ -48,7 +107,8 @@ app links. The resulting `.app` has **zero `/opt/homebrew` runtime dependency**.
 ## Status
 
 Personal tool, early days. Out of scope for now: RFC 3161 trusted timestamps, PAdES LTV,
-and multiple signatures.
+and multiple *cryptographic* signatures in one pass (re-signing a signed output does work —
+each pass is a new incremental revision).
 
 Release builds are signed with a **Developer ID Application** certificate, built with the
 **Hardened Runtime** and a secure timestamp, and **notarized** by Apple (then stapled), so

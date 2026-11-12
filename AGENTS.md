@@ -11,16 +11,27 @@ Read this file first, then `README.md` for the user-facing overview.
 ```
 PDFSign/                      Swift + Objective-C++ app source
   PDFSignApp.swift            @main App entry; WindowGroup, min window size
-  AppModel.swift              @Observable state machine (Phase: empty/editing/signing/done/failed)
-  ContentView.swift           SwiftUI UI; native title-bar toolbar (Open, Draw, cert Picker, Sign & Save)
-  Models.swift                SigningIdentity, SignatureBox
-  KeychainService.swift       Lists kSecClassIdentity items; common-name labels
+  main.swift                  Entry point: CLI subcommands run headless, otherwise PDFSignApp.main()
+  AppModel.swift              @Observable state machine (Phase: empty/editing/signing/done/failed),
+                              field list + selection, review-request loading
+  ContentView.swift           SwiftUI UI; toolbar (Open, Add Signature/Date/Text, Stamp, cert Picker,
+                              Sign & Save) + FieldInspector bar for the selected field
+  Models.swift                SigningIdentity (+ SHA-256 fingerprint), FieldKind, PlacedField,
+                              StampAppearance, PDFPage.clamp
+  KeychainService.swift       Lists kSecClassIdentity items; cert details; exact identity resolve()
+  SigningService.swift        Shared GUI/agent signing path: validation, PlacedField → engine fields;
+                              StampSettings (UserDefaults shared with the CLI)
+  FieldRenderer.swift         Draws stamp/text exactly like the engine (preview + agent renders)
   SignatureStore.swift        Persists the user's signature image (PNG in Application Support)
   SignatureCanvas.swift       Trackpad/mouse signature pad; renders cropped transparent PNG
   AppearanceEditor.swift      Toolbar popover: signature image, date toggle, custom text, stamp preview
-  PDFPreview.swift            NSViewRepresentable PDFView + drag-to-place overlay;
-                              StampAnnotation renders a live stamp preview in the placement box;
-                              box is resizable (8 handles) and movable via mouse-drag sessions
+  PDFPreview.swift            NSViewRepresentable PDFView; drag/click-to-place overlay; one
+                              FieldAnnotation per field (select, move, 8-handle resize, ⌫, arrows)
+  Agent/
+    FieldSpec.swift           Agent JSON field format; ReviewRequest + ReviewInbox (CLI → GUI hand-off)
+    AgentCore.swift           Stateless operations: identities/inspect/text/find/render/sign/review
+    CLI.swift                 `PDFSign <command>` argument parsing, JSON output, usage text
+    MCPServer.swift           Hand-rolled MCP stdio server exposing AgentCore as tools
   SigningEngine/
     PDFSigningEngine.h        C++-free ObjC interface (imports cleanly into Swift)
     PDFSigningEngine.mm       ObjC++ core: PoDoFo signing + SecKeyCreateSignature callback
@@ -48,6 +59,29 @@ and run `xcodegen generate`.
   archive by full path; only system libs (libxml2, z, bz2, expat, iconv) link dynamically via
   the SDK. Result: **no `/opt/homebrew` runtime dependency**, no embedded dylibs to sign.
 - **Output format:** PAdES-B (ETSI.CAdES, detached), SHA-256. Validates in Preview, Acrobat, `pdfsig`.
+- **Multiple fields, one signature.** One signature field carries the CMS signature: the
+  document's own empty field when one is targeted (`formFieldName`), else a new widget-less
+  field. Every signature stamp is a widget (`/Kids`) of that field, so each opens the signature
+  panel; date and text fields are drawn as XObjects into the page content of the *same*
+  incremental update, so the one CMS signature covers all of them. Exception: an existing field
+  whose dict is merged with its widget can't take more kids — extra stamps are flattened then.
+- **Existing signature fields** are found by walking page widgets (not `/AcroForm /Fields`,
+  which real PDFs often omit — such fields are added to `/Fields` when signed), matched by
+  fully qualified name, refused if they already carry `/V`.
+- **Rotation.** All rects are raw (unrotated) page space, as PDFKit uses. The engine lays a box
+  out at its displayed size and sets the XObject `/Matrix` to counter `/Rotate`; widgets get a
+  raw `/Rect` + raw appearance (PoDoFo's rotation-aware `Rect`/`SetAppearanceStream` are
+  bypassed on purpose). The preview draws through `PDFPage.displayTransform`. Agent JSON uses
+  displayed coordinates, converted only in `FieldSpec` / `AgentCore`.
+  Date fields are resolved to text in Swift at signing time; the engine only knows
+  signature vs. text. Non-WinAnsi text (č, Cyrillic…) falls back to an embedded subset of
+  Arial (metric-compatible with Helvetica, so preview layout still matches).
+- **Agent interface.** The app binary is also a CLI (`PDFSign help`) and an MCP server
+  (`PDFSign mcp`), both thin wrappers over `AgentCore`. Pages are 1-based in agent JSON,
+  0-based internally. `review` writes a request to `~/Library/Application Support/PDFSign/inbox/`
+  and launches (`open -n`) or pings (distributed notification) the GUI. Plain `open` /
+  `NSWorkspace.openApplication` fail with -600 from the CLI because LaunchServices counts the
+  CLI process — same executable — as the running app.
 - **Stamp appearance** is customizable (Appearance toolbar popover): a drawn/imported signature
   image replaces the default seal badge, plus optional date line and free-text line. Settings
   persist in UserDefaults; the image as `~/Library/Application Support/PDFSign/signature.png`.
@@ -116,6 +150,14 @@ Re-zip the **stapled** `.app` for the artifact you actually ship.
 - After finishing a unit of work, list any leftover TODOs.
 
 ## Known gaps / TODO
+
+- When filling an existing field whose dict is merged with its widget, extra signature stamps
+  are flattened (not widgets) — splitting the merged dict would fix it.
+- Nested non-terminal signature fields (a widget-less field that itself has a `/Parent`) are
+  refused: PoDoFo only resolves widget-less signatures from the top level of `/Fields`.
+- Multi-widget signatures verified with `pdfsig`, poppler and PDFKit; not yet opened in Acrobat.
+- Tiny signature boxes (e.g. initials) clip the stamp text at the 3 pt font floor — an
+  image-only stamp variant would suit initials better.
 
 - No RFC 3161 trusted timestamp on the *signature* itself (the codesign timestamp is separate);
   no PAdES-LTV; single signature only.

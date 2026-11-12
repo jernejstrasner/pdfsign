@@ -62,18 +62,20 @@ struct ContentView: View {
 
         if hasDocument {
             ToolbarItem(placement: .navigation) {
-                Toggle(isOn: $model.placing) {
-                    Label(model.box == nil ? "Draw signature area" : "Redraw area",
-                          systemImage: "rectangle.dashed")
+                ControlGroup {
+                    ForEach(FieldKind.allCases) { kind in
+                        Toggle(isOn: placingBinding(kind)) {
+                            Label("Add \(kind.title)", systemImage: kind.systemImage)
+                        }
+                        .help("Add a \(kind.title.lowercased()) field — drag on the page, or click for the default size")
+                    }
                 }
-                .toggleStyle(.button)
-                .help("Drag a rectangle on the page to place the signature")
                 .disabled(model.phase != .editing)
             }
 
             ToolbarItem(placement: .navigation) {
                 Button { showAppearance.toggle() } label: {
-                    Label("Signature", systemImage: "pencil.and.scribble")
+                    Label("Stamp", systemImage: "pencil.and.scribble")
                 }
                 .help("Signature image, date and text stamped with the signature")
                 .popover(isPresented: $showAppearance, arrowEdge: .bottom) {
@@ -87,12 +89,15 @@ struct ContentView: View {
                     Text("No certificates").foregroundStyle(.secondary)
                 } else {
                     Picker("Certificate", selection: $model.selectedIdentity) {
+                        if model.selectedIdentity == nil {
+                            Text("Choose certificate…").tag(SigningIdentity?.none)
+                        }
                         ForEach(model.identities) { identity in
                             Text(identity.label).tag(Optional(identity))
                         }
                     }
                     .labelsHidden()
-                    .help("Signing certificate")
+                    .help(model.selectedIdentity.map(certificateHelp) ?? "Signing certificate")
                     .disabled(model.phase != .editing)
                 }
                 Button(action: presentSavePanel) {
@@ -102,6 +107,8 @@ struct ContentView: View {
                         Label("Sign & Save…", systemImage: "signature")
                     }
                 }
+                .help(model.signProblems.isEmpty ? "Sign and save a copy"
+                      : model.signProblems.joined(separator: "\n"))
                 .disabled(!(model.phase == .editing && model.canSign))
 
                 if case .done(let url) = model.phase {
@@ -113,28 +120,74 @@ struct ContentView: View {
         }
     }
 
+    private func placingBinding(_ kind: FieldKind) -> Binding<Bool> {
+        Binding(get: { model.placingKind == kind },
+                set: { model.placingKind = $0 ? kind : nil })
+    }
+
+    private func certificateHelp(_ identity: SigningIdentity) -> String {
+        var lines = [identity.details.subject]
+        if let issuer = identity.details.issuer { lines.append("Issued by \(issuer)") }
+        if let until = identity.details.notAfter {
+            lines.append("Valid until \(until.formatted(date: .abbreviated, time: .omitted))")
+        }
+        lines.append("SHA-256 \(identity.fingerprint.prefix(16))…")
+        return lines.joined(separator: "\n")
+    }
+
     // MARK: Editor
 
     private var editor: some View {
-        ZStack(alignment: .top) {
+        ZStack {
             if let document = model.document {
-                PDFPreview(document: document, placing: $model.placing,
-                           appearance: model.stampAppearance) { box in
-                    model.box = box
-                    model.placing = false
+                PDFPreview(document: document,
+                           fields: model.fields,
+                           selectedFieldID: model.selectedFieldID,
+                           placingKind: model.phase == .editing ? model.placingKind : nil,
+                           slots: model.phase == .editing ? model.availableSlots : [],
+                           appearance: model.stampAppearance,
+                           handlers: handlers)
+            }
+            VStack {
+                if let kind = model.placingKind {
+                    hint("Drag on the page to place the \(kind.title.lowercased()) field, or click for the default size")
+                } else if let banner = model.banner {
+                    hint(banner)
+                } else if !model.availableSlots.isEmpty, !model.fields.contains(where: \.isFormField) {
+                    hint(model.availableSlots.count == 1
+                         ? "This document has a signature field — click it to sign there"
+                         : "This document has \(model.availableSlots.count) signature fields — click the one to sign")
+                }
+                Spacer()
+                if model.phase == .editing, model.selectedField != nil {
+                    FieldInspector(model: model)
+                        .padding(10)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
-            if model.placing {
-                Text("Drag on the page to place the signature")
-                    .font(.callout)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(.thinMaterial, in: Capsule())
-                    .padding(.top, 10)
-                    .transition(.move(edge: .top).combined(with: .opacity))
-            }
         }
-        .animation(.default, value: model.placing)
+        .animation(.default, value: model.placingKind)
+        .animation(.default, value: model.selectedFieldID)
+    }
+
+    private func hint(_ text: String) -> some View {
+        Text(text)
+            .font(.callout)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(.thinMaterial, in: Capsule())
+            .padding(.top, 10)
+            .transition(.move(edge: .top).combined(with: .opacity))
+    }
+
+    private var handlers: FieldEditingHandlers {
+        FieldEditingHandlers(
+            add: { id, kind, page, rect in model.addField(id: id, kind: kind, pageIndex: page, rect: rect) },
+            move: { id, rect in model.moveField(id, to: rect) },
+            select: { model.selectedFieldID = $0 },
+            delete: { model.deleteField($0) },
+            placingDone: { model.placingKind = nil },
+            fillSlot: { model.fillSlot($0) })
     }
 
     private func presentSavePanel() {
@@ -142,9 +195,90 @@ struct ContentView: View {
         panel.allowedContentTypes = [.pdf]
         panel.canCreateDirectories = true
         panel.nameFieldStringValue = model.defaultSaveName
+        if let dir = model.suggestedOutputURL?.deletingLastPathComponent() {
+            panel.directoryURL = dir
+        }
         if panel.runModal() == .OK, let url = panel.url {
             model.sign(to: url)
         }
+    }
+}
+
+/// Edits the selected field: its text or date format, plus duplicate / every page / delete.
+private struct FieldInspector: View {
+    @Bindable var model: AppModel
+    @FocusState private var textFocused: Bool
+
+    var body: some View {
+        if let field = model.selectedField {
+            HStack(spacing: 10) {
+                Label(field.kind.title, systemImage: field.kind.systemImage)
+                    .font(.headline)
+                Text("page \(field.pageIndex + 1)")
+                    .foregroundStyle(.secondary)
+
+                switch field.kind {
+                case .text:
+                    TextField("Text to stamp", text: Binding(
+                        get: { model.selectedField?.text ?? "" },
+                        set: { model.selectedField?.text = $0 }))
+                        .textFieldStyle(.roundedBorder)
+                        .focused($textFocused)
+                        .frame(minWidth: 180)
+                case .date:
+                    TextField("Format", text: Binding(
+                        get: { model.selectedField?.dateFormat ?? "" },
+                        set: { model.selectedField?.dateFormat = $0 }))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 120)
+                        .help("Date format, e.g. yyyy-MM-dd or d. M. yyyy — filled in when you sign")
+                    Text(field.displayText() ?? "")
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                case .signature:
+                    Text(signatureRole(field))
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer(minLength: 0)
+
+                Button { model.duplicateSelected() } label: {
+                    Label("Duplicate", systemImage: "plus.square.on.square")
+                }
+                .keyboardShortcut("d")
+                .help("Duplicate (⌘D)")
+                if (model.document?.pageCount ?? 1) > 1 {
+                    Button { model.copySelectedToAllPages() } label: {
+                        Label("Every Page", systemImage: "square.stack")
+                    }
+                    .help("Copy this field to the same spot on every other page")
+                }
+                Button(role: .destructive) { model.deleteField(field.id) } label: {
+                    Label("Delete", systemImage: "trash")
+                }
+                .help("Delete field (⌫)")
+            }
+            .labelStyle(.titleAndIcon)
+            .controlSize(.regular)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+            .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
+            .frame(maxWidth: 820)
+            .onAppear(perform: focusEmptyText)
+            .onChange(of: model.selectedFieldID) { focusEmptyText() }
+        }
+    }
+
+    private func signatureRole(_ field: PlacedField) -> String {
+        if let name = field.formFieldName { return "Signs the document's \u{201C}\(name)\u{201D} field" }
+        let primary = model.fields.first(where: \.isFormField) ?? model.fields.first { $0.kind == .signature }
+        return primary?.id == field.id ? "Digital signature" : "Additional stamp of the same signature"
+    }
+
+    /// A freshly placed text field is useless until typed into — put the cursor there.
+    private func focusEmptyText() {
+        if let f = model.selectedField, f.kind == .text, f.text.isEmpty { textFocused = true }
     }
 }
 
@@ -189,7 +323,7 @@ private struct SignedView: View {
     var body: some View {
         ZStack(alignment: .top) {
             if let document {
-                PDFPreview(document: document, placing: .constant(false)) { _ in }
+                PDFPreview(document: document)
             } else {
                 ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
             }

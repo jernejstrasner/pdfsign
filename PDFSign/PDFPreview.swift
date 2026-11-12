@@ -1,8 +1,8 @@
 import SwiftUI
 import PDFKit
 
-/// Transparent overlay on top of the PDF that captures the drag and draws the live
-/// selection rectangle. When inactive it passes mouse events through (hitTest → nil)
+/// Transparent overlay on top of the PDF that captures the placement drag and draws the
+/// live selection rectangle. When inactive it passes mouse events through (hitTest → nil)
 /// so normal PDF scrolling/selection keeps working.
 final class DrawOverlay: NSView {
     var active = false {
@@ -10,8 +10,8 @@ final class DrawOverlay: NSView {
     }
     var onCommit: ((NSRect) -> Void)?
     var onUpdate: ((NSRect) -> Void)?   // live drag rect, once past the size threshold
-    var onCancel: (() -> Void)?        // drag ended below the threshold
-    /// Hide the dashed drag rect while the live stamp preview is standing in for it.
+    var onClick: ((NSPoint) -> Void)?   // released below the threshold: place a default-size field
+    /// Hide the dashed drag rect while the live preview is standing in for it.
     var suppressDragRect = false {
         didSet { needsDisplay = true }
     }
@@ -38,11 +38,15 @@ final class DrawOverlay: NSView {
     }
 
     override func mouseUp(with event: NSEvent) {
-        let rect = current
+        let rect = current, origin = start
         start = nil
         current = nil
         needsDisplay = true
-        if let rect, rect.width > 6, rect.height > 6 { onCommit?(rect) } else { onCancel?() }
+        if let rect, rect.width > 6, rect.height > 6 {
+            onCommit?(rect)
+        } else if let origin {
+            onClick?(origin)
+        }
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -61,160 +65,69 @@ final class DrawOverlay: NSView {
     }
 }
 
-/// The placement box rendered as the actual stamp: same layout the engine draws
-/// (border, left graphic, text lines) so what you see is what gets signed.
-final class StampAnnotation: PDFAnnotation {
-    let appearance: StampAppearance
+/// A placed field rendered as its final content (stamp / text) so what you see is what
+/// gets signed, plus editing affordances. UI only — never saved into the signed PDF
+/// (the engine re-stamps from the source file).
+final class FieldAnnotation: PDFAnnotation {
+    var field: PlacedField
+    var appearance: StampAppearance
+    var isSelectedField = false
     /// Handle square size in screen points (converted to page units at draw time).
     var handleScreenSize: CGFloat = 7
 
-    init(bounds: CGRect, appearance: StampAppearance) {
+    init(field: PlacedField, appearance: StampAppearance) {
+        self.field = field
         self.appearance = appearance
-        super.init(bounds: bounds, forType: .square, withProperties: nil)
-        shouldPrint = true
+        super.init(bounds: field.rect, forType: .square, withProperties: nil)
+        shouldPrint = false
     }
     required init?(coder: NSCoder) { fatalError("not supported") }
-
-    private static let dateFormatter: DateFormatter = {
-        let df = DateFormatter()
-        df.dateFormat = "yyyy-MM-dd HH:mm"
-        return df
-    }()
 
     override func draw(with box: PDFDisplayBox, in context: CGContext) {
         let b = bounds
         guard b.width > 4, b.height > 4 else { return }
-        context.saveGState()
-        // draw() is called in page space (y-up); flip into AppKit space within the bounds.
-        context.translateBy(x: b.minX, y: b.minY + b.height)
-        context.scaleBy(x: 1, y: -1)
-        context.setShouldAntialias(true)
-        context.interpolationQuality = .high
-        NSGraphicsContext.saveGraphicsState()
-        NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: true)
+        let unit = pixelUnit(context)
 
-        let w = b.width, h = b.height
-        let pad: CGFloat = 6
-
-        // Never let content spill outside the box.
-        NSBezierPath(rect: CGRect(x: 0, y: 0, width: w, height: h)).addClip()
-
-        // Subtle rounded border, matching the engine.
-        NSColor(white: 0.75, alpha: 1).setStroke()
-        let border = NSBezierPath(roundedRect: CGRect(x: 0.6, y: 0.6,
-                                                      width: max(1, w - 1.2), height: max(1, h - 1.2)),
-                                  xRadius: 4, yRadius: 4)
-        border.lineWidth = 0.8
-        border.stroke()
-
-        // --- Adaptive layout, mirroring the engine ---
-        // Wide box: graphic left, text right. Tall box: graphic top, text below,
-        // centered. Fonts shrink to fit the available width.
-        let name = appearance.name.map { "Signed by \($0)" } ?? "Digitally signed"
-        var subs: [String] = []
-        if appearance.showDate {
-            subs.append(Self.dateFormatter.string(from: Date()) + " UTC")
-        }
-        if let text = appearance.customText, !text.isEmpty { subs.append(text) }
-
-        let sigImage = appearance.image.flatMap {
-            $0.size.width > 0 && $0.size.height > 0 ? $0 : nil
-        }
-        let sigAspect = sigImage.map { $0.size.width / $0.size.height } ?? 1
-
-        let horizontal = w >= h * 1.5
-        var fs1 = min(max(h * 0.20, 5), 11)
-        var fs2 = min(max(h * 0.165, 4.5), 9)
-        var imgX = pad, imgY: CGFloat = 0, imgW: CGFloat = 0, imgH: CGFloat = 0
-        var tx = pad, availW = w - 2 * pad
-        var textRegionTop: CGFloat = 0, textRegionH = h
-
-        if horizontal {
-            if sigImage != nil {
-                imgH = max(8, h - 2 * pad)
-                imgW = imgH * sigAspect
-                let maxW = max(8, w * 0.45)
-                if imgW > maxW { imgW = maxW; imgH = imgW / sigAspect }
+        FieldRenderer.withFieldContext(context, rect: b, display: page?.displayTransform ?? .identity) { size in
+            var shown = field
+            shown.rect = b
+            if field.kind == .text, field.text.isEmpty {
+                // Placeholder so an empty text field is visible and obviously unfilled.
+                ("Text…" as NSString).draw(
+                    at: NSPoint(x: 2, y: max(0, (size.height - 12) / 2)),
+                    withAttributes: [.font: NSFont.systemFont(ofSize: min(11, size.height * 0.6)),
+                                     .foregroundColor: NSColor.systemOrange])
             } else {
-                imgH = min(max(h - 2 * pad, 16), 40)  // badge slot
-                imgW = imgH
+                FieldRenderer.draw(shown, appearance: appearance, size: size)
             }
-            imgY = (h - imgH) / 2
-            tx = pad + imgW + pad
-            availW = w - tx - pad
-        } else {
-            imgH = sigImage != nil
-                ? min(h * 0.45, (w - 2 * pad) / sigAspect)
-                : min(max(min(h * 0.45, w - 2 * pad), 12), 40)
-            imgW = sigImage != nil ? imgH * sigAspect : imgH
-            imgX = (w - imgW) / 2
-            imgY = pad
-            textRegionTop = imgY + imgH + pad
-            textRegionH = max(0, h - pad - textRegionTop)
-            fs1 = min(max(textRegionH * 0.34, 5), 11)
-            fs2 = min(max(fs1 * 0.82, 4.5), 9)
-        }
 
-        // Helvetica to match the engine's PDF standard-14 fonts — SF Pro can't be
-        // embedded in the output (Apple's license allows mock-ups only), so the
-        // preview conforms to the engine, not the other way around.
-        func fonts() -> (NSFont, NSFont) {
-            (NSFont(name: "Helvetica-Bold", size: fs1) ?? NSFont.boldSystemFont(ofSize: fs1),
-             NSFont(name: "Helvetica", size: fs2) ?? NSFont.systemFont(ofSize: fs2))
+            if isSelectedField, field.isFormField {
+                // The form fixes this box — outline it, but offer no resize handles.
+                let p = NSBezierPath(rect: CGRect(origin: .zero, size: size).insetBy(dx: unit, dy: unit))
+                p.lineWidth = 2 * unit
+                NSColor.controlAccentColor.setStroke()
+                p.stroke()
+            } else if isSelectedField {
+                drawHandles(size: size, unit: unit)
+            } else if field.kind != .signature {
+                // Text/date are borderless in the output — outline them so they're findable.
+                let p = NSBezierPath(rect: CGRect(origin: .zero, size: size).insetBy(dx: 0.5 * unit, dy: 0.5 * unit))
+                p.lineWidth = unit
+                p.setLineDash([3 * unit, 2 * unit], count: 2, phase: 0)
+                NSColor.controlAccentColor.withAlphaComponent(0.6).setStroke()
+                p.stroke()
+            }
         }
-        var (boldFont, regFont) = fonts()
-        func width(of s: String, font: NSFont) -> CGFloat {
-            (s as NSString).size(withAttributes: [.font: font]).width
-        }
-        var maxLineW = width(of: name, font: boldFont)
-        for s in subs { maxLineW = max(maxLineW, width(of: s, font: regFont)) }
-        if maxLineW > availW, maxLineW > 0 {
-            let scale = availW / maxLineW
-            fs1 = max(3, fs1 * scale)  // past ~3pt it clips at the border
-            fs2 = max(3, fs2 * scale)
-            (boldFont, regFont) = fonts()
-        }
+    }
 
-        // Graphic: signature image, else the seal badge.
-        if let image = sigImage {
-            image.draw(in: CGRect(x: imgX, y: imgY, width: imgW, height: imgH),
-                       from: .zero, operation: .sourceOver, fraction: 1,
-                       respectFlipped: true, hints: [.interpolation: NSImageInterpolation.high])
-        } else if let base = NSImage(systemSymbolName: "checkmark.seal.fill", accessibilityDescription: nil),
-                  let icon = base.withSymbolConfiguration(
-                    NSImage.SymbolConfiguration(pointSize: imgH * 0.9, weight: .semibold)
-                        .applying(NSImage.SymbolConfiguration(
-                            hierarchicalColor: NSColor(red: 0.20, green: 0.65, blue: 0.33, alpha: 1)))) {
-            let s = icon.size
-            let scale = min(imgH / s.width, imgH / s.height, 1)
-            icon.draw(in: CGRect(x: imgX + (imgH - s.width * scale) / 2,
-                                 y: imgY + (imgH - s.height * scale) / 2,
-                                 width: s.width * scale, height: s.height * scale),
-                      from: .zero, operation: .sourceOver, fraction: 1,
-                      respectFlipped: true, hints: [.interpolation: NSImageInterpolation.high])
-        }
+    private func drawHandles(size: CGSize, unit: CGFloat) {
+        let w = size.width, h = size.height
+        let outline = NSBezierPath(rect: CGRect(origin: .zero, size: size).insetBy(dx: 0.5 * unit, dy: 0.5 * unit))
+        outline.lineWidth = unit
+        NSColor.controlAccentColor.setStroke()
+        outline.stroke()
 
-        // Text block, centered in its region.
-        let lh1 = fs1 * 1.3, lh2 = fs2 * 1.25
-        let blockH = lh1 + CGFloat(subs.count) * lh2
-        var y = textRegionTop + (textRegionH - blockH) / 2
-
-        name.draw(at: NSPoint(x: horizontal ? tx : (w - width(of: name, font: boldFont)) / 2, y: y),
-                  withAttributes: [.font: boldFont,
-                                   .foregroundColor: NSColor(white: 0.10, alpha: 1)])
-        y += lh1
-        for line in subs {
-            line.draw(at: NSPoint(x: horizontal ? tx : (w - width(of: line, font: regFont)) / 2, y: y),
-                      withAttributes: [.font: regFont,
-                                       .foregroundColor: NSColor(white: 0.37, alpha: 1)])
-            y += lh2
-        }
-
-        // Selection handles — UI affordance only; this annotation is never saved
-        // into the signed PDF (the engine re-stamps from the source file).
-        // Constant screen size: convert through the CTM (page units → device px).
-        let backing = NSScreen.main?.backingScaleFactor ?? 2
-        let hs = handleScreenSize * backing / max(context.ctm.a, 0.01)
+        let hs = handleScreenSize * unit
         let inset = hs / 2
         let centers: [CGPoint] = [  // flipped space: y-down, (0,0) = top-left
             CGPoint(x: inset, y: inset), CGPoint(x: w / 2, y: inset),
@@ -226,43 +139,92 @@ final class StampAnnotation: PDFAnnotation {
             let r = CGRect(x: c.x - inset, y: c.y - inset, width: hs, height: hs)
             NSColor.white.setFill()
             NSBezierPath(rect: r).fill()
-            NSColor.controlAccentColor.setStroke()
             let p = NSBezierPath(rect: r)
-            p.lineWidth = 1
+            p.lineWidth = unit
             p.stroke()
         }
-
-        NSGraphicsContext.restoreGraphicsState()
-        context.restoreGState()
     }
 }
 
-/// PDFView that lets the user drag a rectangle to place the signature. The committed
-/// box is shown as a stamp-preview annotation on the page so it scrolls/zooms with content.
+/// Page units → device pixels, so affordances keep a constant on-screen size. Uses the
+/// CTM's scale, not `a` alone, which is 0 on 90°/270° pages.
+private func pixelUnit(_ context: CGContext) -> CGFloat {
+    let backing = NSScreen.main?.backingScaleFactor ?? 2
+    let m = context.ctm
+    return backing / max(hypot(m.a, m.b), 0.01)
+}
+
+/// One of the document's own empty signature fields, offered as a place to sign: a
+/// dashed box with a "Sign here" tag. Clicking it fills that field (see fillSlot).
+final class SlotAnnotation: PDFAnnotation {
+    let slot: FormSignatureField
+
+    init(slot: FormSignatureField) {
+        self.slot = slot
+        super.init(bounds: slot.rect, forType: .square, withProperties: nil)
+        shouldPrint = false
+    }
+    required init?(coder: NSCoder) { fatalError("not supported") }
+
+    override func draw(with box: PDFDisplayBox, in context: CGContext) {
+        let unit = pixelUnit(context)
+        FieldRenderer.withFieldContext(context, rect: bounds, display: page?.displayTransform ?? .identity) { size in
+            let tint = NSColor.systemOrange
+            tint.withAlphaComponent(0.10).setFill()
+            CGRect(origin: .zero, size: size).fill()
+            let p = NSBezierPath(rect: CGRect(origin: .zero, size: size).insetBy(dx: unit, dy: unit))
+            p.lineWidth = 1.5 * unit
+            p.setLineDash([5 * unit, 3 * unit], count: 2, phase: 0)
+            tint.setStroke()
+            p.stroke()
+            let label = "Sign here" as NSString
+            let font = NSFont.systemFont(ofSize: min(12, max(6, size.height * 0.3)), weight: .semibold)
+            let ls = label.size(withAttributes: [.font: font])
+            label.draw(at: NSPoint(x: (size.width - ls.width) / 2, y: (size.height - ls.height) / 2),
+                       withAttributes: [.font: font, .foregroundColor: tint])
+        }
+    }
+}
+
+/// Callbacks from the PDF view back into the model. The view owns transient state
+/// (in-progress drags); the model owns the committed field list.
+struct FieldEditingHandlers {
+    var add: (_ id: UUID, _ kind: FieldKind, _ pageIndex: Int, _ rect: CGRect) -> Void = { _, _, _, _ in }
+    var move: (_ id: UUID, _ rect: CGRect) -> Void = { _, _ in }
+    var select: (UUID?) -> Void = { _ in }
+    var delete: (UUID) -> Void = { _ in }
+    var placingDone: () -> Void = {}
+    /// Sign into the document's own signature field with this name.
+    var fillSlot: (String) -> Void = { _ in }
+}
+
+/// PDFView that places, selects, moves and resizes fields. Fields are shown as
+/// annotations so they scroll/zoom with the content.
 final class SelectablePDFView: PDFView {
-    var placing = false {
+    var placingKind: FieldKind? {
         didSet {
-            overlay.active = placing
-            if placing {
+            guard placingKind != oldValue else { return }
+            overlay.active = placingKind != nil
+            if placingKind != nil {
                 addSubview(overlay, positioned: .above, relativeTo: nil)
                 overlay.suppressDragRect = false
+            } else {
+                discardPending()
             }
             overlay.frame = bounds
             window?.invalidateCursorRects(for: overlay)
         }
     }
-    var onSelect: ((SignatureBox) -> Void)?
-    var stampAppearance = StampAppearance() {
-        didSet {
-            // Rebuild the preview in place when the stamp's look changes.
-            guard stampAppearance != oldValue, let prev = previewAnnotation else { return }
-            showPreview(on: prev.page, rect: prev.annotation.bounds)
-        }
-    }
+    var handlers = FieldEditingHandlers()
 
     private let overlay = DrawOverlay()
-    private var previewAnnotation: (page: PDFPage, annotation: StampAnnotation)?
-    private var lastCommitted: SignatureBox?
+    private var annotations: [UUID: FieldAnnotation] = [:]
+    private var slotAnnotations: [String: SlotAnnotation] = [:]
+    private var order: [UUID] = []          // model order; later = on top for hit testing
+    private var selectedID: UUID?
+    private var stampAppearance = StampAppearance()
+    /// In-progress placement drag (not yet in the model).
+    private var pending: (id: UUID, annotation: FieldAnnotation)?
 
     override init(frame: NSRect) { super.init(frame: frame); setup() }
     required init?(coder: NSCoder) { super.init(coder: coder); setup() }
@@ -273,7 +235,7 @@ final class SelectablePDFView: PDFView {
         addSubview(overlay)
         overlay.onCommit = { [weak self] rect in self?.commit(overlayRect: rect) }
         overlay.onUpdate = { [weak self] rect in self?.livePreview(overlayRect: rect) }
-        overlay.onCancel = { [weak self] in self?.revertPreview() }
+        overlay.onClick = { [weak self] point in self?.placeDefault(at: point) }
         addTrackingArea(NSTrackingArea(rect: .zero,
                                        options: [.mouseMoved, .activeInKeyWindow, .inVisibleRect],
                                        owner: self, userInfo: nil))
@@ -282,86 +244,158 @@ final class SelectablePDFView: PDFView {
     override func layout() {
         super.layout()
         overlay.frame = bounds
-        if placing { addSubview(overlay, positioned: .above, relativeTo: nil) }
+        if placingKind != nil { addSubview(overlay, positioned: .above, relativeTo: nil) }
     }
 
-    /// Live stamp preview while dragging the initial box: the committed StampAnnotation
-    /// is created/updated in real time, so what you see mid-drag is what you get.
-    private func livePreview(overlayRect: NSRect) {
-        let viewRect = convert(overlayRect, from: overlay)
-        guard let page = page(for: NSPoint(x: viewRect.midX, y: viewRect.midY), nearest: true),
-              document != nil else { return }
-        let pageRect = convert(viewRect, to: page)
-        if let prev = previewAnnotation {
-            if prev.page == page {
-                prev.annotation.bounds = pageRect
+    // MARK: Model → view
+
+    /// Annotations belong to the old document's pages; forget them before swapping.
+    func resetForNewDocument() {
+        annotations.removeAll()
+        slotAnnotations.removeAll()
+        order.removeAll()
+        pending = nil
+        boxDrag = nil
+    }
+
+    /// Reconcile annotations with the model. Bounds of a field being dragged are left
+    /// alone — the drag is the source of truth until mouse-up.
+    func sync(fields: [PlacedField], slots: [FormSignatureField], selectedID: UUID?, appearance: StampAppearance) {
+        guard let doc = document else { return }
+        let appearanceChanged = appearance != stampAppearance
+        stampAppearance = appearance
+        self.selectedID = selectedID
+        order = fields.map(\.id)
+        var touched = Set<PDFPage>()
+
+        // Slots sit below the fields: a filled slot disappears and its field takes over.
+        let liveSlots = Set(slots.map(\.name))
+        for (name, a) in slotAnnotations where !liveSlots.contains(name) {
+            if let page = a.page { page.removeAnnotation(a); touched.insert(page) }
+            slotAnnotations[name] = nil
+        }
+        for slot in slots where slotAnnotations[slot.name] == nil {
+            guard let page = doc.page(at: slot.pageIndex) else { continue }
+            let a = SlotAnnotation(slot: slot)
+            page.addAnnotation(a)
+            slotAnnotations[slot.name] = a
+            touched.insert(page)
+        }
+
+        let live = Set(order)
+        for (id, annotation) in annotations where !live.contains(id) {
+            if let page = annotation.page { page.removeAnnotation(annotation); touched.insert(page) }
+            annotations[id] = nil
+        }
+
+        for field in fields {
+            guard field.pageIndex >= 0, field.pageIndex < doc.pageCount,
+                  let page = doc.page(at: field.pageIndex) else { continue }
+            let isSelected = field.id == selectedID
+            if let a = annotations[field.id] {
+                let dragging = boxDrag?.id == field.id
+                var dirty = appearanceChanged || a.isSelectedField != isSelected || a.field != field
+                a.field = field
+                a.appearance = appearance
+                a.isSelectedField = isSelected
+                if a.page != page {
+                    a.page?.removeAnnotation(a)
+                    a.bounds = field.rect
+                    page.addAnnotation(a)
+                    dirty = true
+                } else if !dragging, a.bounds != field.rect {
+                    a.bounds = field.rect
+                    dirty = true
+                }
+                if dirty { touched.insert(page) }
             } else {
-                prev.page.removeAnnotation(prev.annotation)
-                let annotation = StampAnnotation(bounds: pageRect, appearance: stampAppearance)
-                page.addAnnotation(annotation)
-                previewAnnotation = (page, annotation)
+                let a = FieldAnnotation(field: field, appearance: appearance)
+                a.isSelectedField = isSelected
+                page.addAnnotation(a)
+                annotations[field.id] = a
+                touched.insert(page)
             }
+        }
+        for page in touched { annotationsChanged(on: page) }
+    }
+
+    // MARK: Placement
+
+    private func pagePoint(overlayPoint: NSPoint) -> (PDFPage, CGPoint)? {
+        let viewPt = convert(overlayPoint, from: overlay)
+        guard let page = page(for: viewPt, nearest: true) else { return nil }
+        return (page, convert(viewPt, to: page))
+    }
+
+    /// Live preview while dragging out a new field: what you see mid-drag is what you get.
+    private func livePreview(overlayRect: NSRect) {
+        guard let kind = placingKind, document != nil else { return }
+        let viewRect = convert(overlayRect, from: overlay)
+        guard let page = page(for: NSPoint(x: viewRect.midX, y: viewRect.midY), nearest: true) else { return }
+        let pageRect = page.clamp(convert(viewRect, to: page))
+        if let p = pending, p.annotation.page == page {
+            p.annotation.bounds = pageRect
         } else {
-            showPreview(on: page, rect: pageRect)
+            discardPending()
+            let id = UUID()
+            let a = FieldAnnotation(field: PlacedField(id: id, kind: kind, pageIndex: 0, rect: pageRect),
+                                    appearance: stampAppearance)
+            a.isSelectedField = true
+            page.addAnnotation(a)
+            pending = (id, a)
         }
         overlay.suppressDragRect = true
-        setNeedsDisplay(convert(pageRect, from: page).insetBy(dx: -12, dy: -12))
+        annotationsChanged(on: page)
     }
 
-    /// Drag ended below the size threshold: restore the previously committed box.
-    private func revertPreview() {
-        overlay.suppressDragRect = false
-        if let box = lastCommitted, let doc = document, box.pageIndex < doc.pageCount,
-           let page = doc.page(at: box.pageIndex) {
-            if let prev = previewAnnotation, prev.page == page {
-                prev.annotation.bounds = box.rect
-            } else {
-                showPreview(on: page, rect: box.rect)
-            }
-            setNeedsDisplay(convert(box.rect, from: page).insetBy(dx: -12, dy: -12))
-        } else if let prev = previewAnnotation {
-            prev.page.removeAnnotation(prev.annotation)
-            previewAnnotation = nil
-            setNeedsDisplay(bounds)
-        }
-    }
-
-    /// Forget the box entirely (called when the document changes).
-    func clearBox() {
-        if let prev = previewAnnotation { prev.page.removeAnnotation(prev.annotation) }
-        previewAnnotation = nil
-        lastCommitted = nil
+    private func discardPending() {
+        guard let p = pending else { return }
+        let page = p.annotation.page
+        page?.removeAnnotation(p.annotation)
+        pending = nil
+        if let page { annotationsChanged(on: page) }
     }
 
     private func commit(overlayRect: NSRect) {
         overlay.suppressDragRect = false
         livePreview(overlayRect: overlayRect)
-        placing = false
-        guard let doc = document, let (page, annotation) = previewAnnotation else { return }
-        let box = SignatureBox(pageIndex: doc.index(for: page), rect: annotation.bounds)
-        lastCommitted = box
-        onSelect?(box)
+        guard let doc = document, let kind = placingKind, let p = pending, let page = p.annotation.page else { return }
+        // Adopt the pending annotation under the field's id so sync() finds it — no flicker.
+        annotations[p.id] = p.annotation
+        pending = nil
+        handlers.add(p.id, kind, doc.index(for: page), p.annotation.bounds)
+        handlers.placingDone()
     }
 
-    private func showPreview(on page: PDFPage, rect: CGRect) {
-        if let prev = previewAnnotation { prev.page.removeAnnotation(prev.annotation) }
-        let annotation = StampAnnotation(bounds: rect, appearance: stampAppearance)
-        page.addAnnotation(annotation)
-        previewAnnotation = (page, annotation)
+    private func placeDefault(at overlayPoint: NSPoint) {
+        guard let doc = document, let kind = placingKind,
+              let (page, pt) = pagePoint(overlayPoint: overlayPoint) else { return }
+        discardPending()
+        if kind == .signature, let slot = slotAt(page: page, point: pt) {
+            // Clicking the document's own signature field with the tool: sign there.
+            handlers.fillSlot(slot.name)
+            return
+        }
+        let size = page.pageSize(fromDisplay: kind.defaultSize)
+        let rect = page.clamp(CGRect(x: pt.x - size.width / 2, y: pt.y - size.height / 2,
+                                     width: size.width, height: size.height))
+        handlers.add(UUID(), kind, doc.index(for: page), rect)
+        handlers.placingDone()
     }
 
-    // MARK: Box resize / move
+    // MARK: Selection, move, resize
 
     private enum BoxHandle: CaseIterable { case nw, n, ne, e, se, s, sw, w }
 
     private struct BoxDrag {
+        let id: UUID
         let page: PDFPage
         let startPoint: CGPoint   // page coords
         let startBounds: CGRect   // page coords
         let handle: BoxHandle?    // nil = move
     }
     private var boxDrag: BoxDrag?
-    private let minBoxSize: CGFloat = 24
+    private let minBoxSize: CGFloat = 10
 
     /// Handle centers in page coords (y-up), inset like the drawn handles.
     private func handleCenters(bounds b: CGRect, inset: CGFloat) -> [(BoxHandle, CGPoint)] {
@@ -375,48 +409,72 @@ final class SelectablePDFView: PDFView {
          (.w,  CGPoint(x: b.minX + inset, y: b.midY))]
     }
 
-    private func handleAt(point pt: CGPoint, bounds: CGRect, tol: CGFloat) -> BoxHandle? {
+    private func handleAt(point pt: CGPoint, bounds: CGRect) -> BoxHandle? {
+        let tol = 6.0 / max(scaleFactor, 0.01)
         let inset = 3.5 / max(scaleFactor, 0.01)
         return handleCenters(bounds: bounds, inset: inset)
             .first { abs($0.1.x - pt.x) <= tol && abs($0.1.y - pt.y) <= tol }?.0
     }
 
-    private func cursor(for handle: BoxHandle) -> NSCursor {
+    /// Handles are named in page space; on a 90°/270° page "n" looks sideways on screen.
+    private func cursor(for handle: BoxHandle, on page: PDFPage) -> NSCursor {
+        let sideways = page.rotation % 180 != 0
         switch handle {
-        case .n, .s: return .resizeUpDown
-        case .e, .w: return .resizeLeftRight
+        case .n, .s: return sideways ? .resizeLeftRight : .resizeUpDown
+        case .e, .w: return sideways ? .resizeUpDown : .resizeLeftRight
         default: return .crosshair
         }
     }
 
-    /// The box under the event, if the event is on the box's page. Returns the point
-    /// in page coordinates.
-    private func boxPoint(for event: NSEvent) -> (point: CGPoint, page: PDFPage, bounds: CGRect)? {
-        guard let (boxPage, annotation) = previewAnnotation else { return nil }
+    private func slotAt(page: PDFPage, point: CGPoint) -> FormSignatureField? {
+        slotAnnotations.values.first { $0.page == page && $0.bounds.contains(point) }?.slot
+    }
+
+    private enum Hit { case handle(UUID, BoxHandle), body(UUID), slot(String) }
+
+    /// What's under the event: the selected field's handles win, then the topmost field.
+    private func hit(_ event: NSEvent) -> (hit: Hit, page: PDFPage, point: CGPoint)? {
         let viewPt = convert(event.locationInWindow, from: nil)
-        guard let hitPage = page(for: viewPt, nearest: true), hitPage == boxPage else { return nil }
-        return (convert(viewPt, to: boxPage), boxPage, annotation.bounds)
+        guard let page = page(for: viewPt, nearest: false) else { return nil }
+        let pt = convert(viewPt, to: page)
+        if let sel = selectedID, let a = annotations[sel], a.page == page, !a.field.isFormField,
+           let handle = handleAt(point: pt, bounds: a.bounds) {
+            return (.handle(sel, handle), page, pt)
+        }
+        for id in order.reversed() {
+            if let a = annotations[id], a.page == page, a.bounds.contains(pt) {
+                return (.body(id), page, pt)
+            }
+        }
+        if let slot = slotAt(page: page, point: pt) { return (.slot(slot.name), page, pt) }
+        return nil
     }
 
     override func mouseDown(with event: NSEvent) {
-        guard !placing, let (pt, page, bounds) = boxPoint(for: event) else {
+        guard placingKind == nil, let (hit, page, pt) = hit(event) else {
+            if placingKind == nil, selectedID != nil { handlers.select(nil) }
             super.mouseDown(with: event)
             return
         }
-        let tol = 9.0 / max(scaleFactor, 0.01)
-        if let handle = handleAt(point: pt, bounds: bounds, tol: tol) {
-            boxDrag = BoxDrag(page: page, startPoint: pt, startBounds: bounds, handle: handle)
-            cursor(for: handle).set()
-        } else if bounds.contains(pt) {
-            boxDrag = BoxDrag(page: page, startPoint: pt, startBounds: bounds, handle: nil)
+        window?.makeFirstResponder(self)  // so Delete / arrows reach keyDown
+        switch hit {
+        case .handle(let id, let handle):
+            boxDrag = BoxDrag(id: id, page: page, startPoint: pt,
+                              startBounds: annotations[id]!.bounds, handle: handle)
+            cursor(for: handle, on: page).set()
+        case .body(let id):
+            if id != selectedID { handlers.select(id) }
+            guard annotations[id]?.field.isFormField == false else { return }  // fixed by the form
+            boxDrag = BoxDrag(id: id, page: page, startPoint: pt,
+                              startBounds: annotations[id]!.bounds, handle: nil)
             NSCursor.closedHand.set()
-        } else {
-            super.mouseDown(with: event)
+        case .slot(let name):
+            handlers.fillSlot(name)
         }
     }
 
     override func mouseDragged(with event: NSEvent) {
-        guard let drag = boxDrag, let (_, annotation) = previewAnnotation else {
+        guard let drag = boxDrag, let annotation = annotations[drag.id] else {
             super.mouseDragged(with: event)
             return
         }
@@ -453,41 +511,66 @@ final class SelectablePDFView: PDFView {
         }
 
         annotation.bounds = r
-        setNeedsDisplay(convert(r, from: drag.page).insetBy(dx: -12, dy: -12))
+        annotationsChanged(on: drag.page)
     }
 
     override func mouseUp(with event: NSEvent) {
-        guard boxDrag != nil, let (page, annotation) = previewAnnotation else {
+        guard let drag = boxDrag, let annotation = annotations[drag.id] else {
             super.mouseUp(with: event)
             return
         }
         boxDrag = nil
         NSCursor.arrow.set()
-        if let doc = document {
-            let box = SignatureBox(pageIndex: doc.index(for: page), rect: annotation.bounds)
-            lastCommitted = box
-            onSelect?(box)
-        }
+        if annotation.bounds != drag.startBounds { handlers.move(drag.id, annotation.bounds) }
     }
 
     override func mouseMoved(with event: NSEvent) {
         super.mouseMoved(with: event)
-        guard !placing, let (pt, _, bounds) = boxPoint(for: event) else { return }
-        let tol = 9.0 / max(scaleFactor, 0.01)
-        if let handle = handleAt(point: pt, bounds: bounds, tol: tol) {
-            cursor(for: handle).set()
-        } else if bounds.contains(pt) {
-            NSCursor.openHand.set()
+        guard placingKind == nil, boxDrag == nil, let (hit, page, _) = hit(event) else { return }
+        switch hit {
+        case .handle(_, let handle): cursor(for: handle, on: page).set()
+        case .body(let id): (annotations[id]?.field.isFormField == true ? NSCursor.arrow : .openHand).set()
+        case .slot: NSCursor.pointingHand.set()
         }
+    }
+
+    // MARK: Keyboard
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 53 {  // Escape: leave placement mode, else deselect
+            if placingKind != nil { handlers.placingDone(); return }
+            if selectedID != nil { handlers.select(nil); return }
+        }
+        guard let id = selectedID, let a = annotations[id], let page = a.page else {
+            super.keyDown(with: event)
+            return
+        }
+        let step: CGFloat = event.modifierFlags.contains(.shift) ? 10 : 1
+        // Arrows move the box the way it looks on screen, whatever the page's /Rotate.
+        let screen: CGVector
+        switch event.keyCode {
+        case 51, 117: handlers.delete(id); return   // delete, forward delete
+        case 123: screen = CGVector(dx: -step, dy: 0)
+        case 124: screen = CGVector(dx: step, dy: 0)
+        case 125: screen = CGVector(dx: 0, dy: -step)
+        case 126: screen = CGVector(dx: 0, dy: step)
+        default: super.keyDown(with: event); return
+        }
+        guard !a.field.isFormField else { return }
+        let v = page.pageVector(fromDisplay: screen)
+        handlers.move(id, page.clamp(a.bounds.offsetBy(dx: v.dx, dy: v.dy)))
     }
 }
 
 /// SwiftUI wrapper around SelectablePDFView.
 struct PDFPreview: NSViewRepresentable {
     let document: PDFDocument
-    @Binding var placing: Bool
+    var fields: [PlacedField] = []
+    var selectedFieldID: UUID? = nil
+    var placingKind: FieldKind? = nil
+    var slots: [FormSignatureField] = []
     var appearance = StampAppearance()
-    var onSelect: (SignatureBox) -> Void
+    var handlers = FieldEditingHandlers()
 
     func makeNSView(context: Context) -> SelectablePDFView {
         let view = SelectablePDFView()
@@ -495,18 +578,16 @@ struct PDFPreview: NSViewRepresentable {
         view.displayMode = .singlePageContinuous
         view.displaysPageBreaks = true
         view.document = document
-        view.onSelect = onSelect
-        view.stampAppearance = appearance
         return view
     }
 
     func updateNSView(_ view: SelectablePDFView, context: Context) {
         if view.document !== document {
-            view.clearBox()
+            view.resetForNewDocument()
             view.document = document
         }
-        view.placing = placing
-        view.onSelect = onSelect
-        view.stampAppearance = appearance
+        view.handlers = handlers
+        view.placingKind = placingKind
+        view.sync(fields: fields, slots: slots, selectedID: selectedFieldID, appearance: appearance)
     }
 }
