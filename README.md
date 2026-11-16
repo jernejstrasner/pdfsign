@@ -34,14 +34,20 @@ The app binary doubles as a headless CLI and an [MCP](https://modelcontextprotoc
 so an LLM agent can drive the whole flow: inspect the document, find where to sign, place
 fields, render a preview to check them, confirm the certificate, sign and export.
 
+**Setup:** choose **PDFSign → Install Command Line Tool & Agent Skill…** (or run
+`/Applications/PDFSign.app/Contents/MacOS/PDFSign install`). It links `pdfsign` into
+`/usr/local/bin` (`~/.local/bin` if that isn't writable) and installs the
+[agent skill](skill/pdfsign/SKILL.md) into `~/.claude/skills` (and `~/.codex/skills` /
+`~/.agents/skills` when present). With the skill, just ask your agent to sign a PDF — it
+defaults to preparing the document and opening it in PDFSign for you to sign.
+
 ```bash
-PDFSign=/Applications/PDFSign.app/Contents/MacOS/PDFSign
-$PDFSign help                                   # full reference
-$PDFSign find contract.pdf "Signature"          # → page + rectangle of each match
-$PDFSign render contract.pdf --page 3 --fields fields.json --out p3.png   # preview with grid
-$PDFSign identities                             # certificates + SHA-256 fingerprints
-$PDFSign sign contract.pdf --out signed.pdf --identity 4B90DF99 --fields fields.json
-$PDFSign review contract.pdf --fields fields.json   # open in the app for you to sign
+pdfsign help                                   # full reference
+pdfsign find contract.pdf "Signature"          # → page + rectangle of each match
+pdfsign render contract.pdf --page 3 --fields fields.json --out p3.png   # preview with grid
+pdfsign identities                             # certificates + SHA-256 fingerprints
+pdfsign sign contract.pdf --out signed.pdf --identity 4B90DF99 --fields fields.json
+pdfsign review contract.pdf --fields fields.json   # open in the app for you to sign
 ```
 
 `fields.json` (PDF points on the page as displayed — rotation applied, as `render` shows it —
@@ -69,14 +75,6 @@ claude mcp add pdfsign -- /Applications/PDFSign.app/Contents/MacOS/PDFSign mcp
 
 Tools: `list_identities`, `inspect_pdf`, `get_text`, `find_text`, `render_page` (returns the
 PNG), `sign_pdf`, `open_for_review`.
-
-To get a `pdfsign` command, use a wrapper script rather than a symlink — the binary locates
-its bundle from its real path:
-
-```bash
-printf '#!/bin/sh\nexec /Applications/PDFSign.app/Contents/MacOS/PDFSign "$@"\n' > /usr/local/bin/pdfsign
-chmod +x /usr/local/bin/pdfsign
-```
 
 ## How it works
 

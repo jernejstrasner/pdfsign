@@ -15,6 +15,29 @@ struct PDFSignApp: App {
                 }
         }
         .windowResizability(.contentMinSize)
+        .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Install Command Line Tool & Agent Skill…", action: installAgentTools)
+            }
+        }
+    }
+
+    private func installAgentTools() {
+        let alert = NSAlert()
+        do {
+            let r = try Installer.install()
+            alert.messageText = "Installed"
+            var lines: [String] = []
+            if let command = r.command { lines.append("Command: \(command) — run `pdfsign help`.") }
+            lines += r.skills.map { "Agent skill: \($0)" }
+            lines += r.notes
+            alert.informativeText = lines.joined(separator: "\n\n")
+        } catch {
+            alert.alertStyle = .warning
+            alert.messageText = "Couldn't install"
+            alert.informativeText = error.localizedDescription
+        }
+        alert.runModal()
     }
 
     private func loadPendingReview() {

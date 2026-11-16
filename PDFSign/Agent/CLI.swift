@@ -5,7 +5,7 @@ import Foundation
 /// Output is JSON on stdout (agents parse it); exit status 0 on success, 1 on error.
 enum CLI {
     static let commands: Set<String> = ["identities", "inspect", "text", "find", "render", "sign",
-                                        "review", "mcp", "help", "--help", "-h", "version", "--version"]
+                                        "review", "mcp", "install", "help", "--help", "-h", "version", "--version"]
 
     /// Returns an exit code when the arguments ask for CLI mode, nil to start the GUI.
     static func runIfRequested(_ arguments: [String]) -> Int32? {
@@ -20,6 +20,9 @@ enum CLI {
                 emit(["version": appVersion])
             case "mcp":
                 MCPServer().run()
+            case "install":
+                let cliOnly = flag(&args, "--cli"), skillOnly = flag(&args, "--skill")
+                emit(try Installer.install(cli: !skillOnly || cliOnly, skill: !cliOnly || skillOnly))
             case "identities":
                 emit(AgentCore.identities())
             case "inspect":
@@ -79,7 +82,7 @@ enum CLI {
     }
 
     static var appVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
+        Installer.appBundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
     }
 
     // MARK: Argument helpers
@@ -173,6 +176,8 @@ enum CLI {
                                          Open the document in the PDFSign app with the fields pre-placed for
                                          the user to review and sign themselves. Nothing is signed.
       mcp                                Run as an MCP server over stdio (same operations as tools).
+      install [--cli | --skill]          Link `pdfsign` into /usr/local/bin (or ~/.local/bin) and install the
+                                         agent skill for Claude Code / Codex. Default: both.
       version | help
 
     IDENTITY (ID)

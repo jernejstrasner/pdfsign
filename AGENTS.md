@@ -32,11 +32,13 @@ PDFSign/                      Swift + Objective-C++ app source
     AgentCore.swift           Stateless operations: identities/inspect/text/find/render/sign/review
     CLI.swift                 `PDFSign <command>` argument parsing, JSON output, usage text
     MCPServer.swift           Hand-rolled MCP stdio server exposing AgentCore as tools
+    Installer.swift           `pdfsign` symlink on PATH + agent skill install (app menu / `install`)
   SigningEngine/
     PDFSigningEngine.h        C++-free ObjC interface (imports cleanly into Swift)
     PDFSigningEngine.mm       ObjC++ core: PoDoFo signing + SecKeyCreateSignature callback
     PDFSign-Bridging-Header.h Swift ↔ ObjC bridge
 
+skill/pdfsign/SKILL.md        Agent skill (uses the CLI); bundled into Resources/pdfsign
 scripts/build-podofo.sh       One-time: builds a STATIC PoDoFo into vendor/ (git-ignored)
 vendor/podofo/                Built artifacts: include/ + lib/libpodofo_bundle.a (git-ignored)
 project.yml                   XcodeGen project definition (source of truth for the Xcode project)
@@ -82,6 +84,9 @@ and run `xcodegen generate`.
   and launches (`open -n`) or pings (distributed notification) the GUI. Plain `open` /
   `NSWorkspace.openApplication` fail with -600 from the CLI because LaunchServices counts the
   CLI process — same executable — as the running app.
+  The CLI is driven by a bundled skill (`skill/pdfsign`) rather than requiring MCP setup:
+  one shell command per step is all an agent needs. `Installer.appBundle` resolves the
+  real bundle because `pdfsign` is a symlink (Bundle.main would point at /usr/local/bin).
 - **Stamp appearance** is customizable (Appearance toolbar popover): a drawn/imported signature
   image replaces the default seal badge, plus optional date line and free-text line. Settings
   persist in UserDefaults; the image as `~/Library/Application Support/PDFSign/signature.png`.

@@ -393,7 +393,7 @@ enum AgentCore {
     /// Bring up the GUI: ping a running instance (it picks the request from the inbox), or
     /// launch one, which reads the inbox at startup.
     private static func launchApp() throws -> URL {
-        var appURL = Bundle.main.bundleURL
+        var appURL = Installer.appBundle.bundleURL
         if appURL.pathExtension != "app" {
             guard let installed = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.strsnr.pdfsign") else {
                 throw AgentError("Can't locate PDFSign.app to open the review.")

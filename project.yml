@@ -38,6 +38,10 @@ targets:
     platform: macOS
     sources:
       - path: PDFSign
+      # Agent skill, copied as a folder into Resources/pdfsign (installed from the app menu).
+      - path: skill/pdfsign
+        type: folder
+        buildPhase: resources
     dependencies:
       - sdk: PDFKit.framework
       - sdk: Security.framework
